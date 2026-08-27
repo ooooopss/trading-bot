@@ -4,7 +4,6 @@ import threading
 import requests
 import pandas as pd
 import ccxt
-from datetime import datetime
 from flask import Flask
 
 app = Flask(__name__)
@@ -20,9 +19,8 @@ def run_flask():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# 골드 및 다우존스 가격대에 맞춘 종목 세팅
-SYMBOLS = ["XAU/USDT", "PAXG/USDT"]
-# 감시할 타임프레임 목록 (4h 제외)
+# 바이낸스 선물 전용 심볼 포맷 (슬래시 제외)
+SYMBOLS = ["XAUUSDT", "PAXGUSDT"]
 TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 RR_RATIO = 1.5
 LOOKBACK = 10
@@ -73,19 +71,29 @@ def calculate_signals(df):
     return df
 
 def bot_loop():
-    exchange = ccxt.binance()
+    # 바이낸스 선물(Futures) 설정
+    exchange = ccxt.binance({
+        'options': {
+            'defaultType': 'future',
+        }
+    })
     
+    try:
+        exchange.load_markets()
+    except Exception as e:
+        print(f"마켓 로딩 실패: {e}")
+
     last_signals = {(symbol, tf): 0 for symbol in SYMBOLS for tf in TIMEFRAMES}
     last_processed_timestamps = {(symbol, tf): 0 for symbol in SYMBOLS for tf in TIMEFRAMES}
     
     symbols_str = ", ".join(SYMBOLS)
     tf_str = ", ".join(TIMEFRAMES)
-    send_telegram(f"<b>[시스템]</b> 다중 종목 봇 시작\n<b>종목:</b> {symbols_str}\n<b>프레임:</b> {tf_str}")
+    send_telegram(f"<b>[시스템]</b> 바이낸스 선물 다중 종목 봇 시작\n<b>종목:</b> {symbols_str}\n<b>프레임:</b> {tf_str}")
 
     while True:
-        try:
-            for symbol in SYMBOLS:
-                for tf in TIMEFRAMES:
+        for symbol in SYMBOLS:
+            for tf in TIMEFRAMES:
+                try:
                     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
@@ -110,7 +118,7 @@ def bot_loop():
                             elif current_signal == -1:
                                 sl_p = completed_bar_with_sig['highest_high']
                                 risk = sl_p - close_p
-                                tp_p = close_p - (risk * RR_RATIO)
+                                tp_p = sl_p - (risk * RR_RATIO)
                                 msg = f"<b>[SELL 신호 발생 - 봉 마감]</b>\n<b>종목: {symbol}</b>\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
                                 send_telegram(msg)
                                 
@@ -118,8 +126,8 @@ def bot_loop():
                         
                         last_processed_timestamps[(symbol, tf)] = completed_bar_time
 
-        except Exception as e:
-            print(f"에러 발생: {e}")
+                except Exception as e:
+                    print(f"[{symbol} {tf}] 스캔 예외 발생: {e}")
 
         time.sleep(5)
 
