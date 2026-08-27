@@ -3,7 +3,6 @@ import time
 import threading
 import requests
 import pandas as pd
-import pandas_ta as ta
 import ccxt
 from flask import Flask
 
@@ -29,6 +28,7 @@ LOOKBACK = 10
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("텔레그램 토큰/Chat ID 미설정")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
@@ -38,25 +38,35 @@ def send_telegram(message):
         print(f"텔레그램 전송 실패: {e}")
 
 def calculate_signals(df):
-    df['ema9'] = ta.ema(df['close'], length=9)
-    df['price_spread'] = ta.stdev(df['high'] - df['low'], length=28)
+    # 1. EMA 9 & 26 (pandas 기본 ewm 사용)
+    df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+    df['slow_ma'] = df['close'].ewm(span=26, adjust=False).mean()
+
+    # 2. Price Spread & OBV Shadow
+    df['price_spread'] = (df['high'] - df['low']).rolling(window=28).std()
     
     df['change'] = df['close'].diff()
     df['direction'] = df['change'].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
     df['obv'] = (df['direction'] * df['volume']).cumsum()
     
-    df['v_smooth'] = ta.sma(df['obv'], length=14)
-    df['v_spread'] = ta.stdev(df['obv'] - df['v_smooth'], length=28)
+    df['v_smooth'] = df['obv'].rolling(window=14).mean()
+    df['v_spread'] = (df['obv'] - df['v_smooth']).rolling(window=28).std()
     
     df['shadow'] = (df['obv'] - df['v_smooth']) / df['v_spread'] * df['price_spread']
     df['out_obv'] = df.apply(lambda row: row['high'] + row['shadow'] if row['shadow'] > 0 else row['low'] + row['shadow'], axis=1)
     
-    df['obvema'] = ta.ema(df['out_obv'], length=1)
-    df['ma_obv'] = ta.dema(df['obvema'], length=9)
+    # OBV EMA & DEMA
+    df['obvema'] = df['out_obv'].ewm(span=1, adjust=False).mean()
     
-    df['slow_ma'] = ta.ema(df['close'], length=26)
+    # DEMA = 2 * EMA(x) - EMA(EMA(x))
+    ema1 = df['obvema'].ewm(span=9, adjust=False).mean()
+    ema2 = ema1.ewm(span=9, adjust=False).mean()
+    df['ma_obv'] = 2 * ema1 - ema2
+    
+    # MACD
     df['macd'] = df['ma_obv'] - df['slow_ma']
 
+    # 최근 N봉 저점 / 고점 계산
     df['lowest_low'] = df['low'].rolling(window=LOOKBACK).min()
     df['highest_high'] = df['high'].rolling(window=LOOKBACK).max()
 
@@ -70,7 +80,7 @@ def calculate_signals(df):
 def bot_loop():
     exchange = ccxt.binance()
     last_signal = 0
-    send_telegram("<b>[시스템]</b> 무료 클라우드 봇이 정상 시작되었습니다.")
+    send_telegram("<b>[시스템]</b> 클라우드 봇이 정상 시작되었습니다.")
 
     while True:
         try:
@@ -106,10 +116,8 @@ def bot_loop():
         time.sleep(60)
 
 if __name__ == '__main__':
-    # 모니터링 봇은 스레드로 백그라운드 실행
     t = threading.Thread(target=bot_loop)
     t.daemon = True
     t.start()
     
-    # Flask 웹 서버 실행
     run_flask()
