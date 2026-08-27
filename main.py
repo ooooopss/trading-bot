@@ -20,8 +20,9 @@ def run_flask():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-SYMBOL = "BTC/USDT"
-# 4h를 제외한 타임프레임 목록
+# 골드 및 다우존스 가격대에 맞춘 종목 세팅
+SYMBOLS = ["XAU/USDT", "PAXG/USDT"]
+# 감시할 타임프레임 목록 (4h 제외)
 TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 RR_RATIO = 1.5
 LOOKBACK = 10
@@ -73,50 +74,54 @@ def calculate_signals(df):
 
 def bot_loop():
     exchange = ccxt.binance()
-    last_signals = {tf: 0 for tf in TIMEFRAMES}
-    last_processed_timestamps = {tf: 0 for tf in TIMEFRAMES}
     
-    send_telegram(f"<b>[시스템]</b> 봉 마감 직후 알림 봇 시작 ({', '.join(TIMEFRAMES)})")
+    last_signals = {(symbol, tf): 0 for symbol in SYMBOLS for tf in TIMEFRAMES}
+    last_processed_timestamps = {(symbol, tf): 0 for symbol in SYMBOLS for tf in TIMEFRAMES}
+    
+    symbols_str = ", ".join(SYMBOLS)
+    tf_str = ", ".join(TIMEFRAMES)
+    send_telegram(f"<b>[시스템]</b> 다중 종목 봇 시작\n<b>종목:</b> {symbols_str}\n<b>프레임:</b> {tf_str}")
 
     while True:
         try:
-            for tf in TIMEFRAMES:
-                ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=tf, limit=100)
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                
-                completed_bar = df.iloc[-2]
-                completed_bar_time = completed_bar['timestamp']
-                
-                if completed_bar_time > last_processed_timestamps[tf]:
-                    df = calculate_signals(df)
-                    completed_bar_with_sig = df.iloc[-2]
-                    current_signal = completed_bar_with_sig['signal']
+            for symbol in SYMBOLS:
+                for tf in TIMEFRAMES:
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
-                    if current_signal != last_signals[tf] and current_signal != 0:
-                        close_p = completed_bar_with_sig['close']
+                    completed_bar = df.iloc[-2]
+                    completed_bar_time = completed_bar['timestamp']
+                    
+                    if completed_bar_time > last_processed_timestamps[(symbol, tf)]:
+                        df = calculate_signals(df)
+                        completed_bar_with_sig = df.iloc[-2]
+                        current_signal = completed_bar_with_sig['signal']
                         
-                        if current_signal == 1:
-                            sl_p = completed_bar_with_sig['lowest_low']
-                            risk = close_p - sl_p
-                            tp_p = close_p + (risk * RR_RATIO)
-                            msg = f"<b>[BUY 신호 발생 - 봉 마감]</b>\n종목: {SYMBOL}\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
-                            send_telegram(msg)
-
-                        elif current_signal == -1:
-                            sl_p = completed_bar_with_sig['highest_high']
-                            risk = sl_p - close_p
-                            tp_p = close_p - (risk * RR_RATIO)
-                            msg = f"<b>[SELL 신호 발생 - 봉 마감]</b>\n종목: {SYMBOL}\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
-                            send_telegram(msg)
+                        if current_signal != last_signals[(symbol, tf)] and current_signal != 0:
+                            close_p = completed_bar_with_sig['close']
                             
-                        last_signals[tf] = current_signal
-                    
-                    last_processed_timestamps[tf] = completed_bar_time
+                            if current_signal == 1:
+                                sl_p = completed_bar_with_sig['lowest_low']
+                                risk = close_p - sl_p
+                                tp_p = close_p + (risk * RR_RATIO)
+                                msg = f"<b>[BUY 신호 발생 - 봉 마감]</b>\n<b>종목: {symbol}</b>\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
+                                send_telegram(msg)
+
+                            elif current_signal == -1:
+                                sl_p = completed_bar_with_sig['highest_high']
+                                risk = sl_p - close_p
+                                tp_p = close_p - (risk * RR_RATIO)
+                                msg = f"<b>[SELL 신호 발생 - 봉 마감]</b>\n<b>종목: {symbol}</b>\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
+                                send_telegram(msg)
+                                
+                            last_signals[(symbol, tf)] = current_signal
+                        
+                        last_processed_timestamps[(symbol, tf)] = completed_bar_time
 
         except Exception as e:
             print(f"에러 발생: {e}")
 
-        time.sleep(3)
+        time.sleep(5)
 
 if __name__ == '__main__':
     t = threading.Thread(target=bot_loop)
