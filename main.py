@@ -19,8 +19,8 @@ def run_flask():
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# 바이낸스 선물 전용 심볼 포맷 (슬래시 제외)
-SYMBOLS = ["XAUUSDT", "PAXGUSDT"]
+# 트레이딩뷰 OANDA XAUUSD에 가장 가까운 바이낸스 선물 대표 심볼
+SYMBOLS = ["XAUUSDT"]
 TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 RR_RATIO = 1.5
 LOOKBACK = 10
@@ -71,7 +71,6 @@ def calculate_signals(df):
     return df
 
 def bot_loop():
-    # 바이낸스 선물(Futures) 설정
     exchange = ccxt.binance({
         'options': {
             'defaultType': 'future',
@@ -88,7 +87,7 @@ def bot_loop():
     
     symbols_str = ", ".join(SYMBOLS)
     tf_str = ", ".join(TIMEFRAMES)
-    send_telegram(f"<b>[시스템]</b> 바이낸스 선물 다중 종목 봇 시작\n<b>종목:</b> {symbols_str}\n<b>프레임:</b> {tf_str}")
+    send_telegram(f"<b>[시스템]</b> OANDA 추종 바이낸스 선물 봇 시작\n<b>종목:</b> {symbols_str}\n<b>프레임:</b> {tf_str}")
 
     while True:
         for symbol in SYMBOLS:
@@ -129,7 +128,7 @@ def bot_loop():
                 except Exception as e:
                     print(f"[{symbol} {tf}] 스캔 예외 발생: {e}")
 
-        time.sleep(5)
+        time.sleep(3)
 
 if __name__ == '__main__':
     t = threading.Thread(target=bot_loop)
