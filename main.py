@@ -1,11 +1,24 @@
 import os
 import time
+import threading
 import requests
 import pandas as pd
 import pandas_ta as ta
 import ccxt
+from flask import Flask
 
-# 환경 변수에서 텔레그램 정보 읽어오기
+# Flask 웹 서버 설정 (Render Free 플랜 유지용)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# 텔레그램 환경 변수
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
@@ -16,7 +29,6 @@ LOOKBACK = 10
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("텔레그램 토큰 또는 Chat ID가 설정되지 않았습니다.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
@@ -55,43 +67,49 @@ def calculate_signals(df):
 
     return df
 
-exchange = ccxt.binance()
-last_signal = 0
+def bot_loop():
+    exchange = ccxt.binance()
+    last_signal = 0
+    send_telegram("<b>[시스템]</b> 무료 클라우드 봇이 정상 시작되었습니다.")
 
-print("클라우드 알림 봇 작동 시작...")
-send_telegram("<b>[시스템]</b> 클라우드 봇이 정상 시작되었습니다.")
-
-while True:
-    try:
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        df = calculate_signals(df)
-        last_bar = df.iloc[-2]
-        current_signal = last_bar['signal']
-        
-        if current_signal != last_signal and current_signal != 0:
-            close_p = last_bar['close']
+    while True:
+        try:
+            ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            if current_signal == 1:
-                sl_p = last_bar['lowest_low']
-                risk = close_p - sl_p
-                tp_p = close_p + (risk * RR_RATIO)
+            df = calculate_signals(df)
+            last_bar = df.iloc[-2]
+            current_signal = last_bar['signal']
+            
+            if current_signal != last_signal and current_signal != 0:
+                close_p = last_bar['close']
                 
-                msg = f"<b>[BUY 신호 발생]</b>\n종목: {SYMBOL} ({TIMEFRAME})\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
-                send_telegram(msg)
+                if current_signal == 1:
+                    sl_p = last_bar['lowest_low']
+                    risk = close_p - sl_p
+                    tp_p = close_p + (risk * RR_RATIO)
+                    msg = f"<b>[BUY 신호 발생]</b>\n종목: {SYMBOL} ({TIMEFRAME})\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
+                    send_telegram(msg)
 
-            elif current_signal == -1:
-                sl_p = last_bar['highest_high']
-                risk = sl_p - close_p
-                tp_p = close_p - (risk * RR_RATIO)
-                
-                msg = f"<b>[SELL 신호 발생]</b>\n종목: {SYMBOL} ({TIMEFRAME})\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
-                send_telegram(msg)
-                
-            last_signal = current_signal
+                elif current_signal == -1:
+                    sl_p = last_bar['highest_high']
+                    risk = sl_p - close_p
+                    tp_p = close_p - (risk * RR_RATIO)
+                    msg = f"<b>[SELL 신호 발생]</b>\n종목: {SYMBOL} ({TIMEFRAME})\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
+                    send_telegram(msg)
+                    
+                last_signal = current_signal
 
-    except Exception as e:
-        print(f"에러 발생: {e}")
+        except Exception as e:
+            print(f"에러 발생: {e}")
 
-    time.sleep(60) # 1분마다 모니터링
+        time.sleep(60)
+
+if __name__ == '__main__':
+    # 모니터링 봇은 스레드로 백그라운드 실행
+    t = threading.Thread(target=bot_loop)
+    t.daemon = True
+    t.start()
+    
+    # Flask 웹 서버 실행
+    run_flask()
