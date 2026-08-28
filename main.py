@@ -1,138 +1,65 @@
-import os
 import time
-import threading
 import requests
-import pandas as pd
-import ccxt
-from flask import Flask
+from datetime import datetime
 
-app = Flask(__name__)
+SYMBOL = "XAUUSDT"
+BASE_URL = "https://fapi.binance.com"
 
-@app.route('/')
-def home():
-    return "Bot is running!"
+# 각 타임프레임별 '분(minute)' 단위 기준
+# 1분봉(매분), 3분봉(3분마다), 5분봉(5분마다), 15분봉(15분마다), 1시간봉(60분마다)
+INTERVAL_MINUTES = {
+    "1m": 1,
+    "3m": 3,
+    "5m": 5,
+    "15m": 15,
+    "1h": 60
+}
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+# 마지막으로 스캔을 완료한 '분(minute)'을 기록하여 중복 실행 방지
+last_scanned_minute = {tf: -1 for tf in INTERVAL_MINUTES}
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-
-# 트레이딩뷰 OANDA XAUUSD에 가장 가까운 바이낸스 선물 대표 심볼
-SYMBOLS = ["XAUUSDT"]
-TIMEFRAMES = ["1m", "5m", "15m", "1h"]
-RR_RATIO = 1.5
-LOOKBACK = 10
-
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("텔레그램 토큰/Chat ID 미설정")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+def fetch_klines(symbol, interval):
+    endpoint = f"{BASE_URL}/fapi/v1/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": 5}
     try:
-        requests.post(url, json=payload)
+        res = requests.get(endpoint, params=params, timeout=5)
+        res.raise_for_status()
+        return res.json()
     except Exception as e:
-        print(f"텔레그램 전송 실패: {e}")
+        print(f"[{symbol} {interval}] 스캔 에러: {e}")
+        return None
 
-def calculate_signals(df):
-    df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
-    df['slow_ma'] = df['close'].ewm(span=26, adjust=False).mean()
-
-    df['price_spread'] = (df['high'] - df['low']).rolling(window=28).std()
+def run_candle_close_bot():
+    print(f"🚀 {SYMBOL} 캔들 마감 기반 정석 스캐너 시작...")
     
-    df['change'] = df['close'].diff()
-    df['direction'] = df['change'].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
-    df['obv'] = (df['direction'] * df['volume']).cumsum()
-    
-    df['v_smooth'] = df['obv'].rolling(window=14).mean()
-    df['v_spread'] = (df['obv'] - df['v_smooth']).rolling(window=28).std()
-    
-    df['shadow'] = (df['obv'] - df['v_smooth']) / df['v_spread'] * df['price_spread']
-    df['out_obv'] = df.apply(lambda row: row['high'] + row['shadow'] if row['shadow'] > 0 else row['low'] + row['shadow'], axis=1)
-    
-    df['obvema'] = df['out_obv'].ewm(span=1, adjust=False).mean()
-    
-    ema1 = df['obvema'].ewm(span=9, adjust=False).mean()
-    ema2 = ema1.ewm(span=9, adjust=False).mean()
-    df['ma_obv'] = 2 * ema1 - ema2
-    
-    df['macd'] = df['ma_obv'] - df['slow_ma']
-
-    df['lowest_low'] = df['low'].rolling(window=LOOKBACK).min()
-    df['highest_high'] = df['high'].rolling(window=LOOKBACK).max()
-
-    df['macd_diff'] = df['macd'].diff()
-    df['signal'] = 0
-    df.loc[df['macd_diff'] > 0, 'signal'] = 1
-    df.loc[df['macd_diff'] < 0, 'signal'] = -1
-
-    return df
-
-def bot_loop():
-    exchange = ccxt.binance({
-        'options': {
-            'defaultType': 'future',
-        }
-    })
-    
-    try:
-        exchange.load_markets()
-    except Exception as e:
-        print(f"마켓 로딩 실패: {e}")
-
-    last_signals = {(symbol, tf): 0 for symbol in SYMBOLS for tf in TIMEFRAMES}
-    last_processed_timestamps = {(symbol, tf): 0 for symbol in SYMBOLS for tf in TIMEFRAMES}
-    
-    symbols_str = ", ".join(SYMBOLS)
-    tf_str = ", ".join(TIMEFRAMES)
-    send_telegram(f"<b>[시스템]</b> OANDA 추종 바이낸스 선물 봇 시작\n<b>종목:</b> {symbols_str}\n<b>프레임:</b> {tf_str}")
-
     while True:
-        for symbol in SYMBOLS:
-            for tf in TIMEFRAMES:
-                try:
-                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf, limit=100)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        now = datetime.now()
+        current_minute = now.minute
+        current_second = now.second
+        
+        # 💡 핵심: 매 분 1초~3초 사이에 캔들 마감 스캔 검사 (서버 데이터 확정 대기 1초)
+        if 1 <= current_second <= 3:
+            
+            for tf, min_unit in INTERVAL_MINUTES.items():
+                # 1. 해당 타임프레임의 주기가 되었는지 확인 (예: 5분봉은 minute % 5 == 0)
+                # 2. 이번 분에 이미 스캔을 수행했는지 체크하여 중복 실행 방지
+                if (current_minute % min_unit == 0) and (last_scanned_minute[tf] != current_minute):
                     
-                    completed_bar = df.iloc[-2]
-                    completed_bar_time = completed_bar['timestamp']
+                    data = fetch_klines(SYMBOL, tf)
+                    if data:
+                        # data[-2]가 방금 막 '완성(마감)된 캔들' 데이터입니다.
+                        closed_candle = data[-2]
+                        close_price = float(closed_candle[4])
+                        print(f"[{now.strftime('%H:%M:%S')}] [{SYMBOL} {tf}] 봉 완성 스캔 완료 - 마감가: {close_price}")
                     
-                    if completed_bar_time > last_processed_timestamps[(symbol, tf)]:
-                        df = calculate_signals(df)
-                        completed_bar_with_sig = df.iloc[-2]
-                        current_signal = completed_bar_with_sig['signal']
-                        
-                        if current_signal != last_signals[(symbol, tf)] and current_signal != 0:
-                            close_p = completed_bar_with_sig['close']
-                            
-                            if current_signal == 1:
-                                sl_p = completed_bar_with_sig['lowest_low']
-                                risk = close_p - sl_p
-                                tp_p = close_p + (risk * RR_RATIO)
-                                msg = f"<b>[BUY 신호 발생 - 봉 마감]</b>\n<b>종목: {symbol}</b>\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
-                                send_telegram(msg)
+                    # 스캔 완료 기록
+                    last_scanned_minute[tf] = current_minute
+                    
+                    # 요청간 0.5초 안전 지연
+                    time.sleep(0.5)
+        
+        # 0.5초마다 시간 체킹
+        time.sleep(0.5)
 
-                            elif current_signal == -1:
-                                sl_p = completed_bar_with_sig['highest_high']
-                                risk = sl_p - close_p
-                                tp_p = sl_p - (risk * RR_RATIO)
-                                msg = f"<b>[SELL 신호 발생 - 봉 마감]</b>\n<b>종목: {symbol}</b>\n<b>프레임: {tf}</b>\n진입가: {close_p:.2f}\nSL: {sl_p:.2f}\nTP: {tp_p:.2f}"
-                                send_telegram(msg)
-                                
-                            last_signals[(symbol, tf)] = current_signal
-                        
-                        last_processed_timestamps[(symbol, tf)] = completed_bar_time
-
-                except Exception as e:
-                    print(f"[{symbol} {tf}] 스캔 예외 발생: {e}")
-
-        time.sleep(3)
-
-if __name__ == '__main__':
-    t = threading.Thread(target=bot_loop)
-    t.daemon = True
-    t.start()
-    
-    run_flask()
+if __name__ == "__main__":
+    run_candle_close_bot()
